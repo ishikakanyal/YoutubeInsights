@@ -1,115 +1,237 @@
 # YouTube Video Analytics Platform
 
-An interactive React dashboard backed by FastAPI, with a distributed Hadoop, YARN, and PySpark data-processing workflow and an optional Pandas local mode. The project includes a Java Hadoop MapReduce job and serves persisted analytics through FastAPI. Both modes use the actual Kaggle data; neither uses fabricated statistics.
+## Project report
 
-> **Analytics modes:** Run the MapReduce and PySpark jobs on the cluster, then set FastAPI to `ANALYTICS_MODE=hdfs` to serve the resulting HDFS dashboard snapshot. `ANALYTICS_MODE=local` is also available for local development and processes the same dataset with Pandas.
+- **Project type:** Distributed data processing and interactive analytics dashboard
+- **Data source:** Kaggle Trending YouTube Video Statistics
+- **Processing technologies:** Hadoop HDFS, Hadoop MapReduce, Apache Spark/PySpark on YARN, and Pandas local mode
+- **Application technologies:** Python FastAPI, React, TypeScript, and Vite
 
-## What the platform analyzes
+## Abstract
 
-The Kaggle **Trending YouTube Video Statistics** dataset has ten regional CSVs (US, CA, GB, DE, FR, IN, JP, KR, MX, RU) and region-specific category JSONs. The archive is from 2017–2018 and contains daily observations of videos that appeared in trending feeds. It is not a census of all YouTube videos, not current live data, and does not say where viewers are located. A region means the feed where the observation appeared.
+This project analyzes historical YouTube trending-video observations from ten regional feeds. A Java Hadoop MapReduce job aggregates observations by region and category ID. A PySpark job is designed to process the source CSVs on YARN, enrich them with regional category labels, calculate latest-observation metrics and trends, and write a compact dashboard snapshot to HDFS. FastAPI serves either that persisted snapshot through WebHDFS or a cached Pandas analysis of the local dataset. A shared React dashboard visualizes the same dashboard data contract in either mode.
 
-The archive is already downloaded and extracted:
+The local analytics path has been run against the downloaded Kaggle files. It produced 375,942 valid observations and the measured outputs in the Results section below. The repository also contains the MapReduce and PySpark implementations and cluster workflow. Local tests and a local frontend build are not evidence that jobs ran across multiple YARN workers; distributed execution should be demonstrated with cluster and YARN application records.
 
-```text
-data/youtube-new.zip
-data/youtube-new/{US,CA,GB,DE,FR,IN,JP,KR,MX,RU}videos.csv
-data/youtube-new/*_category_id.json
+## 1. Introduction
+
+Video engagement data is naturally multi-dimensional: it can be grouped by date, region, video, category, and channel. Repeated observations of the same video also require care: view counts are cumulative counters in snapshots, so summing every row as if it represented new views would inflate totals.
+
+This project provides an end-to-end example of storing and processing this dataset with Hadoop technologies, serving dashboard-ready analytics through a web API, and exploring results through an interactive dashboard. Local Analytics mode provides a way to run the same dashboard using Pandas when a user is developing or demonstrating the interface without submitting a cluster job.
+
+### Problem statement
+
+Build a reproducible analytics platform that processes regional trending-video data, calculates interpretable engagement and ranking metrics, and makes those results accessible through a web dashboard. The distributed workflow must use HDFS for storage, YARN for job scheduling, an actual Hadoop MapReduce job, and PySpark for dashboard analytics.
+
+### Aim and objectives
+
+- Store the regional source files in HDFS for distributed processing.
+- Use a Java MapReduce job to summarize observations by region and category ID.
+- Use PySpark on YARN to build a dashboard snapshot from the original CSV and category JSON files.
+- Expose dashboard data through a FastAPI API and WebHDFS snapshot reader.
+- Provide a React dashboard with region filtering, trends, comparisons, and ranked tables.
+- Provide a cached Pandas mode with a compatible dashboard schema for local use.
+- Avoid fabricated results and distinguish snapshot counters from increments or viewer demographics.
+
+## 2. Dataset and scope
+
+The project uses the [Trending YouTube Video Statistics dataset on Kaggle](https://www.kaggle.com/datasets/datasnaek/youtube-new). It contains a CSV and category metadata JSON for each of ten regions: US, CA, GB, DE, FR, IN, JP, KR, MX, and RU. The archive is from 2017–2018 and contains daily observations of videos appearing in regional trending feeds.
+
+The downloaded archive is located at `data/youtube-new.zip`, with extracted files in `data/youtube-new/`. The archive contains 375,942 CSV observations, and `data/` is excluded from Git. The CSVs are research input, not a live YouTube API feed.
+
+**Interpretation constraints**
+
+- A region identifies the trending feed where an observation appeared; it does not identify a viewer's location.
+- The dataset covers trending videos, not every video on YouTube.
+- Views, likes, and comments are counters recorded in historical snapshots. They are not daily increments or unique viewers.
+- The data is historical and should not be described as current YouTube performance.
+
+## 3. System architecture
+
+```mermaid
+flowchart LR
+    D["Kaggle CSVs + regional category JSONs"]
+    D --> P["Pandas local processing"]
+    D --> I["Ingest source files to HDFS"]
+    I --> MR["Java Hadoop MapReduce<br/>region/category summary"]
+    I --> SP["PySpark job on YARN<br/>dashboard analytics"]
+    SP --> H["Dashboard snapshot in HDFS"]
+    H --> WH["FastAPI WebHDFS reader"]
+    P --> API["FastAPI dashboard API"]
+    WH --> API
+    API --> UI["React + TypeScript dashboard"]
 ```
 
-The ZIP is 210,575,746 bytes; its integrity check passed. The ten CSVs contain 375,942 observations total. Dataset files are excluded from Git by `.gitignore`.
+### Components
 
-### Metric logic
+| Component | Responsibility |
+|---|---|
+| HDFS | Distributed storage for raw regional files and processing outputs. |
+| YARN | Resource management and scheduling for Hadoop MapReduce and Spark applications. |
+| Hadoop MapReduce | Reads regional CSV observations and aggregates observation count, views, likes, and comments by region and category ID. |
+| PySpark | Parses and cleans source rows, enriches categories, selects latest observations, calculates metrics and rankings, and writes dashboard JSON. |
+| FastAPI | Exposes health and dashboard endpoints; selects local Pandas analytics or persisted HDFS snapshot access via configuration. |
+| WebHDFS reader | Lists and reads Spark `part-*` output from the configured HDFS dashboard directory. |
+| Pandas local analytics | Reads all ten regional CSVs and category JSONs and caches the computed dashboard payload in memory. |
+| React dashboard | Presents overview metrics, regional comparison, trends, category analytics, channel and video leaderboards, and the active data mode. |
 
-- Each CSV row is a video observation for a region and trending date. The same video may appear on many dates and in multiple regions.
-- Overview, region, category, channel, and video ranking metrics use the **latest valid observation per `(region, video_id)`**. Repeated cumulative view counts are not added as if they were new daily views.
-- Trend charts use dated observations and therefore show the counters recorded for trending-feed videos on each date. They are snapshots, not daily increments or unique viewers.
-- Engagement rate is `100 * (likes + comments) / views`; it is zero when views are zero. Likes and comments are also reported individually.
-- Category names are looked up using `(region, category_id)` because category ID mappings are regional. Unmapped IDs are labeled with their ID.
-
-## Architecture and data flow
-
-```text
-Kaggle CSV + regional category JSON
-          |                             |
-          v                             v
- Local mode: Pandas             Cluster mode: HDFS /youtube/raw
- Windows/local filesystem          /                 \
-          |                         v                  v
-          |                   Hadoop MapReduce   PySpark on YARN
-          |                   category summary   analytics JSON
-          |                         |                  |
-          |                         |                  v
-          |                         |       HDFS dashboard snapshot
-          |                         |          (read by WebHDFS)
-          \_________________________|__________________/
-                                    |
-                                    v
-                         FastAPI dashboard API
-                                    |
-                                    v
-                         Shared React dashboard
-```
-
-**HDFS** stores raw input and job results. **YARN** schedules MapReduce and Spark containers. The Java MapReduce program reads the Kaggle CSVs and uses map, shuffle, combiner, and reduce stages to aggregate observation count, views, likes, and comments by region and category ID. The PySpark job parses and filters rows, joins regional category labels, selects latest observations, calculates aggregates/rankings/trends, and writes dashboard-ready JSON. It processes the source data in Spark; only grouped summaries are collected to the driver.
-
-**FastAPI** has two selectable analytics modes. For the distributed workflow, set `ANALYTICS_MODE=hdfs` to read the persisted PySpark dashboard snapshot through WebHDFS; the API serves the results without launching a Spark job for each request. `ANALYTICS_MODE=local` reads the ten CSVs and regional category files with Pandas, computes a dashboard snapshot, and caches it in memory. **React** provides the same filters, KPI cards, trends, regional/category comparisons, and channel/video leaderboards for both modes. The interface identifies the selected mode and reports missing data/output rather than presenting sample statistics.
-
-## Repository layout
+### Repository structure
 
 ```text
 analytics/jobs/build_dashboard.py        PySpark dashboard analytics job
-backend/app/                             FastAPI app and WebHDFS snapshot reader
-backend/app/local_analytics.py           Pandas analytics for Local Analytics mode
-backend/tests/                           API and snapshot unit tests
-backend/requirements.txt                 API runtime dependencies
-backend/requirements-dev.txt             API test dependencies
-frontend/                                React + TypeScript + Vite dashboard
-hadoop/mapreduce/                        Java Hadoop MapReduce job and Maven build
-scripts/ingest_kaggle.sh                 Validate/copy dataset files into HDFS
-scripts/verify_cluster.sh                Show HDFS DataNodes and YARN nodes
-data/                                    Local dataset (ignored by Git)
-overview.md                              Expanded operations/deployment guide
+backend/app/config.py                    Environment-based API configuration
+backend/app/local_analytics.py           Pandas analytics and in-memory cache
+backend/app/main.py                      FastAPI routes and mode selection
+backend/app/snapshot.py                  WebHDFS/local persisted snapshot reader
+backend/tests/                           API, analytics, cache, and snapshot tests
+frontend/src/                             React dashboard and styles
+hadoop/mapreduce/                        Java MapReduce job and Maven build
+scripts/ingest_kaggle.sh                 Validate and copy source files to HDFS
+scripts/verify_cluster.sh                Inspect DataNodes and YARN nodes
+data/                                    Downloaded dataset; Git-ignored
 ```
 
-## Run the application on Windows
+## 4. Data processing methodology
 
-The dashboard frontend and FastAPI can run on Windows while the Hadoop/HDFS/YARN and Spark services run in the cluster's Linux environments. The API host must be able to reach the NameNode and the DataNode endpoint used by WebHDFS. Open two PowerShell terminals from the project directory.
+### Cleaning and enrichment
 
-### Terminal 1: FastAPI
+The Pandas and PySpark pipelines read the same ten regional CSVs and regional category metadata. They convert numeric metrics to integers, coerce malformed/missing counts to zero, parse trending dates, and discard records with an empty video ID or an invalid trending date. Category names are joined using both region and category ID because regional category mappings can differ. An unmapped category falls back to its ID.
 
-First-time setup:
+### Latest-observation and trend metrics
+
+For overview totals, regional/category/channel aggregates, and ranked videos, the pipeline selects the latest valid record for each `(region, video_id)`. This prevents cumulative counters from being repeatedly added across dates. Trend series instead aggregate all valid dated observations for each `(region, trending_date)`.
+
+Engagement rate is calculated from aggregated counts:
+
+```text
+engagement_rate (%) = 100 × (likes + comments) / views
+```
+
+The rate is zero if views are zero and is rounded to four decimal places in the analytics payload. The dashboard's overall rate is weighted by total views because it is calculated from summed likes, comments, and views.
+
+### Distributed job outputs
+
+- **MapReduce output:** one tab-separated record per `(region, category_id)`, containing observation count, summed views, summed likes, and summed comments. The job includes a custom CSV input reader for quoted/multiline rows and uses a combiner before the reducer.
+- **PySpark output:** one JSON dashboard payload written as a Spark text output under `/youtube/analytics/dashboard`. Spark performs aggregation before collecting the compact dashboard result; it does not collect the raw dataset to the driver. Output publication uses a temporary HDFS directory and preserves the prior result during replacement.
+- **Local output:** Pandas returns the same top-level dashboard sections and fields as the Spark payload, caches the result in memory, and refreshes it after the configured cache duration.
+
+### Dashboard data contract
+
+Both analytics modes return the same dashboard sections:
+
+```text
+metadata, overview, countries, categories, channels, videos, trends
+```
+
+FastAPI endpoints:
+
+| Method and path | Description |
+|---|---|
+| `GET /api/health` | API liveness and selected analytics mode. |
+| `GET /api/dashboard` | Full dashboard payload. |
+| `GET /api/dashboard?region=US` | Dashboard data filtered to a supported region. |
+| `GET /docs` | FastAPI interactive API documentation. |
+
+## 5. Dashboard features
+
+- Summary cards for views, videos tracked, likes, and engagement rate.
+- Region filter for all ten regional feeds.
+- Dated view trends and regional comparisons.
+- Category totals and engagement comparisons.
+- Channel and video leaderboards.
+- An **About the data** dialog describing the source and metric interpretation.
+- Visible Local Analytics/HDFS snapshot mode identification.
+- Loading, missing-data, and API error states instead of fabricated placeholder statistics.
+
+The same React interface works with both API modes; analytics presentation is not duplicated between them.
+
+### Screenshots
+
+The following screenshots were captured from the running dashboard using the downloaded dataset in Local Analytics mode. They show actual Pandas-calculated results; they are not mockups or Spark/YARN execution evidence.
+
+**Summary metrics**
+
+![Dashboard summary metrics calculated from the Kaggle dataset](docs/screenshots/dashboard-metrics.png)
+
+**Views over time and regional comparison**
+
+![Dashboard trend chart and regional views comparison](docs/screenshots/dashboard-trends-regions.png)
+
+**Top categories and engagement by category**
+
+![Dashboard category rankings and category engagement chart](docs/screenshots/dashboard-categories.png)
+
+**Channel leaderboard**
+
+![Dashboard channel leaderboard showing the top rows](docs/screenshots/dashboard-channels.png)
+
+**Top video performers**
+
+![Dashboard video leaderboard showing the top rows](docs/screenshots/dashboard-videos.png)
+
+## 6. Results from the real dataset
+
+The following figures were produced by running the Pandas pipeline on `data/youtube-new/` in this project workspace. They are dataset-derived results, not hardcoded dashboard values.
+
+| Result | Measured value |
+|---|---:|
+| Valid source observations | 375,942 |
+| Latest `(region, video_id)` records | 207,148 |
+| Regional feeds | 10 |
+| Region/category aggregates | 167 |
+| Channel leaderboard rows | 220 |
+| Ranked video rows | 200 |
+| Region/date trend rows | 1,967 |
+| Latest-observation views total | 109,748,063,568 |
+| Latest-observation likes total | 3,360,407,704 |
+| Latest-observation comments total | 418,671,184 |
+| Overall engagement rate | 3.4434% |
+| Trend date range | 2017-11-14 to 2018-06-14 |
+
+The 220 channel rows comprise the global top 20 and up to 20 per each of the ten regions. The 200 video rows comprise up to 20 videos per region. These are bounded dashboard rankings, not a count of all channels or videos in the source.
+
+## 7. Verification and evidence
+
+Backend tests cover the local payload schema, metric calculations, latest-observation behavior, cache behavior, API mode selection, region filtering, missing data, and WebHDFS snapshot reading. The local payload schema is checked against the Spark job's dashboard schema. The frontend production build runs TypeScript project checks and Vite bundling.
+
+| Verification | Evidence |
+|---|---|
+| Local analytics on the downloaded source data | Executed successfully; output counts and totals are listed in Results. |
+| Backend automated tests | 18 tests passed in the last recorded full run. |
+| Frontend production build | Passed after dashboard UI changes. |
+| MapReduce and PySpark implementations | Source and submission workflows are included in this repository. |
+| Three-node YARN execution | Must be evidenced by cluster node status, YARN application details/logs, and worker task placement; local tests/builds do not establish this. |
+
+For an academic distributed-processing demonstration, retain command output or screenshots showing `hdfs dfsadmin -report`, `yarn node -list`, successful MapReduce output, and a successful YARN Spark application with tasks on both workers. Screenshots of the UI alone demonstrate the frontend, not distributed execution.
+
+## 8. Running the local application on Windows
+
+The current local workflow runs FastAPI and React on Windows and uses the downloaded dataset. The Hadoop cluster daemons are configured to run in Linux environments.
+
+### Prerequisites
+
+- Python 3.12 for the FastAPI environment (the backend requirements support Python 3).
+- Node.js 22 LTS and npm.
+- The extracted dataset under `data/youtube-new/`.
+
+### Start FastAPI
+
+From PowerShell at the project root:
 
 ```powershell
-Set-Location D:\YoutubeInsights
 python -m venv backend\.venv
 .\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
-```
-
-For the distributed dashboard, point FastAPI at the HDFS snapshot produced by the PySpark job:
-
-```powershell
-Set-Location D:\YoutubeInsights\backend
-$env:ANALYTICS_MODE = "hdfs"
-$env:HDFS_WEBHDFS_URL = "http://master:9870/webhdfs/v1"
-$env:HDFS_USER = "hadoop"
-$env:HDFS_DASHBOARD_PATH = "/youtube/analytics/dashboard"
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
-
-Replace `master` with the cluster NameNode hostname or address reachable from the API host. The FastAPI host must also be able to reach the DataNode endpoint returned by WebHDFS. To run locally against the downloaded CSV files instead, use Local Analytics mode:
-
-```powershell
-Set-Location D:\YoutubeInsights\backend
+Set-Location backend
 $env:ANALYTICS_MODE = "local"
 $env:ANALYTICS_DATASET_DIR = "D:\YoutubeInsights\data\youtube-new"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Local mode uses the default dataset path shown above unless `ANALYTICS_DATASET_DIR` is set. Its results are cached in memory for 300 seconds by default; change this using `LOCAL_ANALYTICS_CACHE_SECONDS`.
+The first dashboard request reads the ten CSVs and ten category JSONs. Results are cached in memory for 300 seconds by default; override this with `LOCAL_ANALYTICS_CACHE_SECONDS`.
 
-### Terminal 2: React dashboard
+### Start the React dashboard
 
-First-time setup and start:
+In a second PowerShell terminal:
 
 ```powershell
 Set-Location D:\YoutubeInsights\frontend
@@ -117,120 +239,70 @@ npm ci
 npm run dev
 ```
 
-Open the localhost URL printed by Vite (normally `http://localhost:5173`). FastAPI's interactive docs are at `http://localhost:8000/docs`; its liveness endpoint is `http://localhost:8000/api/health`. In HDFS mode, the API reads the persisted Spark dashboard snapshot. In Local Analytics mode, the first dashboard request reads the ten CSVs and JSON files; subsequent requests use the in-memory cache.
+Open the localhost address printed by Vite (normally `http://localhost:5173`). FastAPI runs at `http://localhost:8000`; its API docs are at `http://localhost:8000/docs`.
 
-The dashboard identifies whether it is displaying Local Analytics results or the HDFS snapshot. If the selected mode's dataset or dashboard output is missing, the UI reports the issue.
+## 9. Three-PC distributed deployment workflow
 
-### HDFS mode configuration
+### Topology
 
-Run the ingestion, MapReduce, and PySpark steps in [Process the dataset on the cluster](#process-the-dataset-on-the-cluster), then set these values before starting FastAPI:
+All three physical laptops may retain Windows as the host OS, while running Hadoop daemons in Linux environments that can communicate over the trusted LAN. Bridged-network Linux VMs are one option. WSL2 networking can require additional configuration; three virtual machines on one laptop do not satisfy the three-PC topology.
 
-```powershell
-$env:ANALYTICS_MODE = "hdfs"
-$env:HDFS_WEBHDFS_URL = "http://master:9870/webhdfs/v1"
-$env:HDFS_USER = "hadoop"
-$env:HDFS_DASHBOARD_PATH = "/youtube/analytics/dashboard"
-```
-
-The React UI is unchanged; FastAPI returns the same dashboard schema and labels the source as an HDFS snapshot. To switch to local processing, set `$env:ANALYTICS_MODE = "local"` and restart FastAPI.
-
-## Required applications and where they go
-
-Ubuntu Server is **not a requirement**. For the academic three-PC cluster, all three physical laptops may keep Windows, but run Hadoop's Linux daemons inside reachable Linux environments. Use bridged-network VMs as a straightforward option. WSL2 is possible, but default NAT networking can block node-to-node connections; verify that all Linux environments can reach each other before choosing it. Three VMs on one laptop do not satisfy the three-separate-PC requirement.
-
-| Software | Install where | Role |
+| Node | Services | Role |
 |---|---|---|
-| Windows 10/11 | Existing laptops | Host OS can remain Windows. |
-| Ubuntu 22.04 LTS (Server or Desktop) | Linux VM/WSL environment on each of the 3 separate laptops | Recommended Linux runtime for cluster services; the Linux nodes must communicate over the LAN. |
-| OpenJDK 11 | All three Linux environments | JVM for Hadoop, YARN, MapReduce, and Spark. Match the chosen Hadoop/Spark support matrix. |
-| Apache Hadoop 3.3.6 | All three Linux environments | HDFS, YARN, command-line client, and MapReduce framework. |
-| Python 3.10 | All three Linux environments | Same PySpark Python runtime/version on driver and worker nodes. |
-| Apache Spark 3.5.3 built for Hadoop 3 | Master; make compatible Spark runtime/JARs available to YARN executors | Submits/runs the PySpark dashboard job on YARN. |
-| Maven 3.9.x | Master or build PC only | Builds the Java MapReduce JAR; not needed on workers after build. |
-| OpenSSH | All Linux environments | Lets the master start/manage Hadoop daemons on the worker environments. |
-| Node.js 22 LTS (includes npm) | Development/UI host | React dependency installation, local development server, and production build. Already present on this laptop. |
-| Python 3.12 | Windows API/development host | FastAPI virtual environment and local tests. Already present on this laptop. |
-| Browser, VS Code, Git | User/development machine | Browser opens the app; editor and Git are recommended, not cluster requirements. |
+| `master` | NameNode, ResourceManager, JobHistoryServer | HDFS namespace, job submission and resource scheduling. |
+| `worker1` | DataNode, NodeManager | HDFS block storage and YARN task execution. |
+| `worker2` | DataNode, NodeManager | HDFS block storage and YARN task execution. |
 
-Use the official sources:
+With two DataNodes, use HDFS replication factor 2. The single NameNode and ResourceManager are single points of failure in this minimum academic topology.
 
-- [Ubuntu Server](https://ubuntu.com/download/server) or [Ubuntu Desktop](https://ubuntu.com/download/desktop)
-- [Apache Hadoop 3.3.6 archives](https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/)
-- [Apache Spark 3.5.3 archives](https://archive.apache.org/dist/spark/spark-3.5.3/)
-- [Apache Maven downloads](https://maven.apache.org/download.cgi)
-- [Node.js downloads](https://nodejs.org/)
-- On Ubuntu, install OpenJDK/Python/OpenSSH/Maven with the OS package manager.
+### Software baseline
 
-Run Hadoop as Linux services rather than native Windows daemons for this deployment. Do not mix arbitrary Hadoop and Spark versions. Docker is not required.
+Use mutually compatible versions and the same Hadoop configuration across nodes. The project setup baseline is:
 
-### Optional: Ubuntu on Windows with WSL2
+| Software | Placement |
+|---|---|
+| Ubuntu 22.04 LTS or another supported Linux distribution | Linux runtime on each separate cluster laptop. |
+| Apache Hadoop 3.3.6 and supported OpenJDK 11 | All three cluster nodes. |
+| Apache Spark 3.5.3 built for Hadoop 3 | Master submission host; make Spark runtime/JARs available to YARN executors. |
+| Python 3.10 | Spark submission host and workers, at a consistent interpreter path. |
+| Maven 3.9.x | Master/build host for the Java job. |
+| OpenSSH | Cluster Linux hosts for Hadoop daemon management. |
+| Node.js 22 and Python 3.12 | UI and FastAPI development/hosting machine as needed. |
 
-WSL2 is useful for learning Linux or single-laptop practice, but it is one computer, not a three-PC cluster. In Administrator PowerShell:
+Official downloads: [Ubuntu Server](https://ubuntu.com/download/server), [Hadoop 3.3.6](https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/), [Spark 3.5.3](https://archive.apache.org/dist/spark/spark-3.5.3/), [Maven](https://maven.apache.org/download.cgi), and [Node.js](https://nodejs.org/). Docker is not required.
 
-```powershell
-wsl --install -d Ubuntu-22.04
-```
+### Configure and start the cluster
 
-Restart if Windows requests it. Launch Ubuntu from Start, create its Linux user, then install baseline packages in the Ubuntu terminal:
+Configure `core-site.xml`, `hdfs-site.xml`, `mapred-site.xml`, and `yarn-site.xml` consistently on all nodes:
 
-```bash
-sudo apt update
-sudo apt install -y openjdk-11-jdk maven python3 python3-venv openssh-server
-java -version
-mvn -version
-```
+- Set `fs.defaultFS` to the NameNode RPC address.
+- Set `dfs.replication=2` and unique NameNode/DataNode storage directories.
+- Set `mapreduce.framework.name=yarn`.
+- Set the ResourceManager hostname and the MapReduce shuffle service for the Hadoop version.
+- List `worker1` and `worker2` in the Hadoop `workers` file.
 
-For a multi-PC cluster, ensure the Linux environments can connect to each other on the required Hadoop ports; WSL2's default NAT may need networking configuration.
+Configure `JAVA_HOME`, `HADOOP_HOME`, `HADOOP_CONF_DIR`, SSH, hostname resolution, time synchronization, and trusted-LAN firewall rules. WebHDFS clients must be able to reach both the NameNode and the DataNode address returned by the NameNode redirect.
 
-## Three-PC cluster topology
-
-Run the Linux environment on each of three separate laptops on the same trusted LAN, with stable IP addresses or DNS names:
-
-| Node | Services | Responsibilities |
-|---|---|---|
-| `master` | NameNode, ResourceManager, JobHistoryServer | Submit jobs; optional FastAPI/UI hosting; store HDFS namespace metadata. |
-| `worker1` | DataNode, NodeManager | Store HDFS blocks; execute YARN containers/tasks. |
-| `worker2` | DataNode, NodeManager | Store HDFS blocks; execute YARN containers/tasks. |
-
-With two DataNodes set HDFS replication to **2**; replication factor 3 cannot be satisfied. The single NameNode and ResourceManager are single points of failure in this minimum academic setup.
-
-Install the same Hadoop distribution and supported Java version on all nodes. Configure `core-site.xml`, `hdfs-site.xml`, `mapred-site.xml`, and `yarn-site.xml` consistently:
-
-- `core-site.xml`: set `fs.defaultFS` to the master NameNode URI, for example `hdfs://master:9000`.
-- `hdfs-site.xml`: set `dfs.replication=2`; configure a unique NameNode data directory on master and DataNode data directories on each worker.
-- `mapred-site.xml`: set `mapreduce.framework.name=yarn`.
-- `yarn-site.xml`: set `yarn.resourcemanager.hostname=master`; configure the MapReduce shuffle auxiliary service appropriate for the Hadoop version.
-- List `worker1` and `worker2` in the Hadoop `workers` file and make host resolution consistent on all nodes.
-
-Set `JAVA_HOME`, `HADOOP_HOME`, `HADOOP_CONF_DIR`, and `PATH` consistently. Configure OpenSSH access from master to both workers for daemon startup. Permit required Hadoop RPC, DataNode transfer, NameNode, ResourceManager, NodeManager, and WebHDFS traffic only on the trusted cluster network; synchronize clocks and reserve sufficient CPU, memory, and disk.
-
-**Format only a new, empty NameNode directory.** Running `hdfs namenode -format` on an initialized NameNode can destroy its namespace. Start HDFS and YARN from master using the distribution scripts (commonly `start-dfs.sh` and `start-yarn.sh`); start JobHistoryServer if required. Check node status:
+Format only a new, empty NameNode storage directory. Formatting an initialized NameNode can destroy HDFS namespace metadata. Start HDFS and YARN with the distribution scripts, then verify the cluster:
 
 ```bash
 hdfs dfsadmin -report
 yarn node -list
 ```
 
-Typical UIs are NameNode `http://master:9870`, ResourceManager `http://master:8088`, and WebHDFS under `http://master:9870/webhdfs/v1`; verify actual configured ports. FastAPI's WebHDFS client also needs to reach the DataNode address returned by the NameNode redirect.
+Common web interfaces are NameNode `http://master:9870` and ResourceManager `http://master:8088`; verify the ports in the actual configuration.
 
-## Process the dataset on the cluster
+### Ingest and process the dataset
 
-The archive is already present in `data/youtube-new/`. Copy that directory to the master (or download/extract it there). Hadoop commands below run in the Linux environment with the cluster configuration loaded. From the project root:
-
-### 1. Upload source files to HDFS
+Copy the extracted dataset to the master, then, from the project root in the Linux environment:
 
 ```bash
 chmod +x scripts/*.sh
 HDFS_RAW_DIR=/youtube/raw scripts/ingest_kaggle.sh /path/to/youtube-new
 hdfs dfs -ls /youtube/raw
-hdfs fsck /youtube/raw -files -blocks
 ```
 
-The ingestion script checks that regional CSVs have matching category JSONs, then copies the inputs. It does not modify the source. Keep `data/` out of Git.
-
-### 2. Build and run the actual Hadoop MapReduce job
-
-From the project root:
+Build and run the actual Hadoop MapReduce job:
 
 ```bash
 cd hadoop/mapreduce
@@ -243,11 +315,7 @@ hadoop jar hadoop/mapreduce/target/youtube-mapreduce-1.0.0.jar \
 hdfs dfs -cat /youtube/analytics/mapreduce-category-summary/part-*
 ```
 
-Output records are tab-separated: `region<TAB>category_id<TAB>observation_count,views,likes,comments`. The MapReduce output directory must not already exist. For reruns, choose a new output directory or carefully remove only the intended old output after checking its exact HDFS path.
-
-### 3. Run PySpark on YARN
-
-From the project root on master, with Spark/YARN configured and the same Python interpreter available on workers:
+Run the PySpark dashboard analytics on YARN:
 
 ```bash
 spark-submit \
@@ -258,28 +326,30 @@ spark-submit \
   --categories 'hdfs:///youtube/raw/*_category_id.json' \
   --output hdfs:///youtube/analytics/dashboard
 hdfs dfs -ls /youtube/analytics/dashboard
+yarn application -list
 ```
 
-Check `yarn application -list`, the ResourceManager UI, and application logs. Confirm task/executor containers ran on **both worker machines**. A local-mode Spark run does not demonstrate distributed execution. The Spark job replaces only its dashboard output directory; never point `--output` at raw input.
+Inspect YARN application logs and confirm executors/tasks ran on both worker machines. Spark local mode is not evidence of multi-node processing. Use a dedicated output path under `/youtube/analytics/`; do not direct the Spark job at raw input.
 
-### 4. Connect FastAPI to the persisted Spark output
+### Connect FastAPI to the HDFS snapshot
 
-FastAPI may run on master or another host with LAN access to the NameNode and redirected DataNode WebHDFS endpoint. On Linux:
+Run FastAPI on the master or another host with WebHDFS connectivity:
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export ANALYTICS_MODE=hdfs
 export HDFS_WEBHDFS_URL=http://master:9870/webhdfs/v1
 export HDFS_USER=hadoop
 export HDFS_DASHBOARD_PATH=/youtube/analytics/dashboard
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-For local development, set `ANALYTICS_SNAPSHOT_FILE` to an actual Spark-produced `part-*` JSON file copied from HDFS. If neither a valid local Spark snapshot nor reachable HDFS output exists, `/api/dashboard` returns HTTP 503 rather than fabricated data.
+If FastAPI runs on Windows, set the same values in PowerShell (for example `$env:ANALYTICS_MODE = "hdfs"`). Replace `master` with a reachable host name or address. `ANALYTICS_SNAPSHOT_FILE` can be used to read an actual copied Spark `part-*` JSON file instead of WebHDFS.
 
-### 5. Start React and view the dashboard
+Start the React development server with:
 
 ```bash
 cd frontend
@@ -287,28 +357,27 @@ npm ci
 npm run dev -- --host 0.0.0.0
 ```
 
-Vite proxies `/api` to `http://localhost:8000` by default. Set `VITE_API_PROXY_TARGET` if FastAPI is hosted elsewhere. For a production frontend, set `VITE_API_BASE_URL` to the API URL and set FastAPI's `CORS_ORIGINS` to the UI origin before building/running.
+The development proxy defaults to `http://localhost:8000`; configure `VITE_API_PROXY_TARGET` when the API is elsewhere. For production, build the frontend with `VITE_API_BASE_URL` set to the API URL and set FastAPI `CORS_ORIGINS` to the frontend origin.
 
-## API and dashboard endpoints
+## 10. Configuration reference
 
-- `GET /api/health` — API process liveness.
-- `GET /api/dashboard` — full dashboard snapshot.
-- `GET /api/dashboard?region=US` — filter analytics to a dataset region.
-- `GET /docs` — interactive FastAPI documentation.
+| Variable | Purpose | Default |
+|---|---|---|
+| `ANALYTICS_MODE` | Select `local` Pandas or `hdfs` snapshot mode. | `local` |
+| `ANALYTICS_DATASET_DIR` | Local directory containing regional CSVs and category JSONs. | Project `data/youtube-new/`. |
+| `LOCAL_ANALYTICS_CACHE_SECONDS` | Local results cache duration. | `300` seconds. |
+| `HDFS_WEBHDFS_URL` | WebHDFS base URL including `/webhdfs/v1`. | `http://localhost:9870/webhdfs/v1` |
+| `HDFS_USER` | WebHDFS simple-auth user. | `hadoop` |
+| `HDFS_DASHBOARD_PATH` | HDFS directory containing Spark output. | `/youtube/analytics/dashboard` |
+| `ANALYTICS_SNAPSHOT_FILE` | Optional local path to a real Spark output JSON file. | Unset. |
+| `SNAPSHOT_CACHE_SECONDS` | Cache duration for persisted HDFS/local snapshot reads. | `15` seconds. |
+| `CORS_ORIGINS` | Comma-separated frontend origins allowed by FastAPI. | Local Vite origins. |
+| `VITE_API_BASE_URL` | API base URL embedded in the production frontend build. | Same-origin/empty. |
+| `VITE_API_PROXY_TARGET` | FastAPI URL used by the Vite development proxy. | `http://localhost:8000` |
 
-The dashboard presents overview counts/metrics, views-over-time observations, regional comparisons, category engagement, channel ranking, and top video ranking. It labels the data as historical trending observations to avoid implying live or viewer-geographic analytics.
+## 11. Testing and development commands
 
-## Compatibility and interpretation notes
-
-- Hadoop is most straightforward to operate on Linux. Windows can remain the laptop host OS; use reachable Linux VMs or a carefully networked WSL2 environment for Hadoop nodes. Native Windows Hadoop is not the recommended cluster route.
-- Pin compatible Hadoop, Spark, Java, and Python versions. Spark's YARN executors need Spark's runtime/JARs; Python must be available at a consistent path/version on master and workers.
-- WebHDFS reads redirect from NameNode to DataNode, so API connectivity to the NameNode alone is insufficient. Secure WebHDFS should replace simple authentication on an untrusted network.
-- The Kaggle archive is relatively small: the project demonstrates distributed processing and cluster operation, not a serious throughput benchmark.
-- Regional category ID mappings differ; joins use both region and category ID.
-
-## Development checks
-
-On Windows PowerShell, from the project root:
+From the project root in Windows PowerShell:
 
 ```powershell
 .\backend\.venv\Scripts\python.exe -m pytest
@@ -318,4 +387,22 @@ npm ci
 npm run build
 ```
 
-For an end-to-end cluster validation, ingest the original dataset, run Hadoop MapReduce and PySpark through YARN, confirm both workers execute tasks, inspect the HDFS outputs, and load the dashboard from the FastAPI host in HDFS mode. A local frontend build or API unit test alone does not establish distributed execution.
+The tests verify local metric calculations and latest-observation behavior, output schema, caching, missing-data handling, API region filtering/mode selection, and snapshot reading. The production build performs TypeScript checks and bundles the React app.
+
+## 12. Future work
+
+- Add deployment automation and service health/monitoring for the three nodes.
+- Add secured Hadoop access and HTTPS reverse-proxy deployment guidance.
+- Add scheduled ingestion and repeatable analytics runs with dated/versioned snapshots.
+- Add explicit data-quality and run metadata to API responses.
+- Add integration tests against a provisioned HDFS/YARN cluster and compare full local/Spark aggregate results.
+- Add dashboard export and richer date/category/channel filtering.
+
+## 13. References
+
+1. [Kaggle: Trending YouTube Video Statistics](https://www.kaggle.com/datasets/datasnaek/youtube-new) — dataset and source files.
+2. [Reference repository: youtubeDataAnalysis](https://github.com/ishmeetkohli/youtubeDataAnalysis) — initial project reference.
+3. [Apache Hadoop](https://hadoop.apache.org/) — HDFS, YARN, and MapReduce framework.
+4. [Apache Spark](https://spark.apache.org/) — distributed analytics framework.
+5. [FastAPI](https://fastapi.tiangolo.com/) — Python API framework.
+6. [React](https://react.dev/) and [Vite](https://vite.dev/) — frontend library and build tooling.
