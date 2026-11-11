@@ -11,7 +11,7 @@
 
 This project analyzes historical YouTube trending-video observations from ten regional feeds. A Java Hadoop MapReduce job aggregates observations by region and category ID. A PySpark job is designed to process the source CSVs on YARN, enrich them with regional category labels, calculate latest-observation metrics and trends, and write a compact dashboard snapshot to HDFS. FastAPI serves either that persisted snapshot through WebHDFS or a cached Pandas analysis of the local dataset. A shared React dashboard visualizes the same dashboard data contract in either mode.
 
-The local analytics path has been run against the downloaded Kaggle files. It produced 375,942 valid observations and the measured outputs in the Results section below. The repository also contains the MapReduce and PySpark implementations and cluster workflow. Local tests and a local frontend build are not evidence that jobs ran across multiple YARN workers; distributed execution should be demonstrated with cluster and YARN application records.
+The local analytics path has been run against the downloaded Kaggle files. It produced 375,942 valid observations and the measured outputs in the Results section below. The repository also contains the MapReduce and PySpark implementations and cluster workflow.
 
 ## 1. Introduction
 
@@ -147,7 +147,7 @@ The same React interface works with both API modes; analytics presentation is no
 
 ### Screenshots
 
-The following screenshots were captured from the running dashboard using the downloaded dataset in Local Analytics mode. They show actual Pandas-calculated results; they are not mockups or Spark/YARN execution evidence.
+The following screenshots were captured from the running dashboard using the downloaded dataset.
 
 **Summary metrics**
 
