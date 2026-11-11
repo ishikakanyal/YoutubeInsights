@@ -1,4 +1,19 @@
-# YouTube Video Analytics Platform
+
+<h1 align="center">YouTube Video Analytics Platform</h1>
+
+<p align="center">
+  A distributed Big Data analytics platform for exploring
+  historical YouTube trending video statistics.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Apache_Hadoop-3.3.6-66CCFF?logo=apachehadoop&logoColor=black" alt="Hadoop"/>
+  <img src="https://img.shields.io/badge/Apache_Spark-3.5.3-E25A1C?logo=apachespark&logoColor=white" alt="Spark"/>
+  <img src="https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/React-Frontend-61DAFB?logo=react&logoColor=black" alt="React"/>
+  <img src="https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white" alt="Python"/>
+</p>
+
 
 ## Project report
 
@@ -49,17 +64,64 @@ The downloaded archive is located at `data/youtube-new.zip`, with extracted file
 ## 3. System architecture
 
 ```mermaid
-flowchart LR
-    D["Kaggle CSVs + regional category JSONs"]
-    D --> P["Pandas local processing"]
-    D --> I["Ingest source files to HDFS"]
-    I --> MR["Java Hadoop MapReduce<br/>region/category summary"]
-    I --> SP["PySpark job on YARN<br/>dashboard analytics"]
-    SP --> H["Dashboard snapshot in HDFS"]
-    H --> WH["FastAPI WebHDFS reader"]
-    P --> API["FastAPI dashboard API"]
-    WH --> API
-    API --> UI["React + TypeScript dashboard"]
+
+flowchart TB
+
+    DATA["Kaggle Trending YouTube Dataset<br/>10 Regional CSVs + Category JSON"]
+
+    subgraph PROCESSING["ANALYTICS AND PROCESSING"]
+
+        subgraph LOCAL["LOCAL ANALYTICS MODE"]
+            direction TB
+            FILES["Local Dataset Files"]
+            PANDAS["Pandas Analytics"]
+            FILES --> PANDAS
+        end
+
+        subgraph DISTRIBUTED["DISTRIBUTED ANALYTICS MODE"]
+            direction TB
+
+            HDFS[("HDFS<br/>Raw Data Storage")]
+
+            subgraph JOBS["HADOOP ECOSYSTEM"]
+                direction LR
+
+                MR["Hadoop MapReduce<br/>Category Aggregation"]
+                SPARK["Apache Spark<br/>Analytics on YARN"]
+            end
+
+            MR --> MR_OUT[("Category Summary Output")]
+            SPARK --> SNAPSHOT[("HDFS Dashboard Snapshot<br/>/youtube/analytics/dashboard")]
+
+            HDFS --> MR
+            HDFS --> SPARK
+        end
+    end
+
+    subgraph PRESENTATION["APPLICATION LAYER"]
+        direction TB
+        API["FastAPI<br/>Dashboard API + WebHDFS"]
+        UI["React + TypeScript<br/>Interactive Dashboard"]
+        API --> UI
+    end
+
+    DATA --> FILES
+    DATA --> HDFS
+    PANDAS --> API
+    SNAPSHOT -->|WebHDFS| API
+
+    classDef source fill:#EAF2FF,stroke:#2563EB,color:#173B70,stroke-width:1.5px
+    classDef storage fill:#E8F7F0,stroke:#15966A,color:#145B43,stroke-width:1.5px
+    classDef compute fill:#FFF3E6,stroke:#E58A24,color:#75400A,stroke-width:1.5px
+    classDef api fill:#F2ECFF,stroke:#8054CC,color:#482C80,stroke-width:1.5px
+    classDef frontend fill:#E6F5FF,stroke:#1687BE,color:#104F70,stroke-width:1.5px
+
+    class DATA,FILES source
+    class HDFS,MR_OUT,SNAPSHOT storage
+    class PANDAS,MR,SPARK compute
+    class API api
+    class UI frontend
+
 ```
 
 ### Components
