@@ -34,6 +34,22 @@ Video engagement data is naturally multi-dimensional: it can be grouped by date,
 
 This project provides an end-to-end example of storing and processing this dataset with Hadoop technologies, serving dashboard-ready analytics through a web API, and exploring results through an interactive dashboard. Local Analytics mode provides a way to run the same dashboard using Pandas when a user is developing or demonstrating the interface without submitting a cluster job.
 
+
+## Table of Contents
+
+- [Project Overview](#what-the-platform-analyzes)
+- [Metric Logic](#metric-logic)
+- [Architecture and Data Flow](#architecture-and-data-flow)
+- [Repository Structure](#repository-layout)
+- [Run the Application](#run-the-application-on-windows)
+- [Required Applications](#required-applications-and-where-they-go)
+- [Three-PC Cluster Setup](#three-pc-cluster-topology)
+- [Process the Dataset](#process-the-dataset-on-the-cluster)
+- [API Reference](#api-and-dashboard-endpoints)
+- [Compatibility Notes](#compatibility-and-interpretation-notes)
+- [Development Checks](#development-checks)
+
+
 ### Problem statement
 
 Build a reproducible analytics platform that processes regional trending-video data, calculates interpretable engagement and ranking metrics, and makes those results accessible through a web dashboard. The distributed workflow must use HDFS for storage, YARN for job scheduling, an actual Hadoop MapReduce job, and PySpark for dashboard analytics.
