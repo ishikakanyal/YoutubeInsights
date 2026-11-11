@@ -1,8 +1,8 @@
 # YouTube Video Analytics Platform
 
-An interactive React dashboard backed by FastAPI. It supports a Pandas-based local demo mode using the actual Kaggle data and an HDFS mode serving persisted PySpark output. The project also includes a Java Hadoop MapReduce job for the planned distributed cluster. Neither mode uses fabricated statistics.
+An interactive React dashboard backed by FastAPI, with a distributed Hadoop, YARN, and PySpark data-processing workflow and an optional Pandas local mode. The project includes a Java Hadoop MapReduce job and serves persisted analytics through FastAPI. Both modes use the actual Kaggle data; neither uses fabricated statistics.
 
-> **Current project status:** Local Analytics mode is the default and works without Hadoop or Spark by processing the actual dataset with Pandas. HDFS mode remains available for use after a cluster is configured and the PySpark job writes its output.
+> **Analytics modes:** Run the MapReduce and PySpark jobs on the cluster, then set FastAPI to `ANALYTICS_MODE=hdfs` to serve the resulting HDFS dashboard snapshot. `ANALYTICS_MODE=local` is also available for local development and processes the same dataset with Pandas.
 
 ## What the platform analyzes
 
@@ -52,7 +52,7 @@ Kaggle CSV + regional category JSON
 
 **HDFS** stores raw input and job results. **YARN** schedules MapReduce and Spark containers. The Java MapReduce program reads the Kaggle CSVs and uses map, shuffle, combiner, and reduce stages to aggregate observation count, views, likes, and comments by region and category ID. The PySpark job parses and filters rows, joins regional category labels, selects latest observations, calculates aggregates/rankings/trends, and writes dashboard-ready JSON. It processes the source data in Spark; only grouped summaries are collected to the driver.
 
-**FastAPI** has two selectable analytics modes. `ANALYTICS_MODE=local` reads the ten CSVs and regional category files with Pandas, computes a dashboard snapshot once, and caches it in memory. `ANALYTICS_MODE=hdfs` preserves WebHDFS access to persisted Spark results and does not launch a Spark job for each request. **React** provides the same filters, KPI cards, trends, regional/category comparisons, and channel/video leaderboards for both modes. The interface labels the selected mode and reports missing data/output rather than presenting sample statistics.
+**FastAPI** has two selectable analytics modes. For the distributed workflow, set `ANALYTICS_MODE=hdfs` to read the persisted PySpark dashboard snapshot through WebHDFS; the API serves the results without launching a Spark job for each request. `ANALYTICS_MODE=local` reads the ten CSVs and regional category files with Pandas, computes a dashboard snapshot, and caches it in memory. **React** provides the same filters, KPI cards, trends, regional/category comparisons, and channel/video leaderboards for both modes. The interface identifies the selected mode and reports missing data/output rather than presenting sample statistics.
 
 ## Repository layout
 
@@ -73,9 +73,9 @@ overview.md                              Expanded operations/deployment guide
 
 ## Run the application on Windows
 
-Python 3.12 and Node.js 22 are already available on the current development laptop. Hadoop/Spark are not required just to open the UI or run the API. Open two PowerShell terminals from the project directory.
+The dashboard frontend and FastAPI can run on Windows while the Hadoop/HDFS/YARN and Spark services run in the cluster's Linux environments. The API host must be able to reach the NameNode and the DataNode endpoint used by WebHDFS. Open two PowerShell terminals from the project directory.
 
-### Terminal 1: FastAPI (Local Analytics mode)
+### Terminal 1: FastAPI
 
 First-time setup:
 
@@ -85,15 +85,27 @@ python -m venv backend\.venv
 .\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 ```
 
-The default dataset path is `D:\YoutubeInsights\data\youtube-new`. To use another folder, set `ANALYTICS_DATASET_DIR` before starting FastAPI. Results are cached in memory for 300 seconds by default; change this using `LOCAL_ANALYTICS_CACHE_SECONDS`.
+For the distributed dashboard, point FastAPI at the HDFS snapshot produced by the PySpark job:
 
-Start the API:
+```powershell
+Set-Location D:\YoutubeInsights\backend
+$env:ANALYTICS_MODE = "hdfs"
+$env:HDFS_WEBHDFS_URL = "http://master:9870/webhdfs/v1"
+$env:HDFS_USER = "hadoop"
+$env:HDFS_DASHBOARD_PATH = "/youtube/analytics/dashboard"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+Replace `master` with the cluster NameNode hostname or address reachable from the API host. The FastAPI host must also be able to reach the DataNode endpoint returned by WebHDFS. To run locally against the downloaded CSV files instead, use Local Analytics mode:
 
 ```powershell
 Set-Location D:\YoutubeInsights\backend
 $env:ANALYTICS_MODE = "local"
+$env:ANALYTICS_DATASET_DIR = "D:\YoutubeInsights\data\youtube-new"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
+
+Local mode uses the default dataset path shown above unless `ANALYTICS_DATASET_DIR` is set. Its results are cached in memory for 300 seconds by default; change this using `LOCAL_ANALYTICS_CACHE_SECONDS`.
 
 ### Terminal 2: React dashboard
 
@@ -105,13 +117,13 @@ npm ci
 npm run dev
 ```
 
-Open the localhost URL printed by Vite (normally `http://localhost:5173`). FastAPI's interactive docs are at `http://localhost:8000/docs`; its liveness endpoint is `http://localhost:8000/api/health`. On the first dashboard request, Pandas reads the ten CSVs and JSON files; subsequent requests use the in-memory cache.
+Open the localhost URL printed by Vite (normally `http://localhost:5173`). FastAPI's interactive docs are at `http://localhost:8000/docs`; its liveness endpoint is `http://localhost:8000/api/health`. In HDFS mode, the API reads the persisted Spark dashboard snapshot. In Local Analytics mode, the first dashboard request reads the ten CSVs and JSON files; subsequent requests use the in-memory cache.
 
-Local Analytics mode is identified in the dashboard and uses Pandas on this machine. It does not run Hadoop, HDFS, YARN, or Spark. If the dataset directory or expected regional files are missing, the dashboard reports the issue. To use the cluster later, switch FastAPI to HDFS mode after the cluster and Spark output are available.
+The dashboard identifies whether it is displaying Local Analytics results or the HDFS snapshot. If the selected mode's dataset or dashboard output is missing, the UI reports the issue.
 
-### Switch to HDFS mode later
+### HDFS mode configuration
 
-After the HDFS cluster and PySpark job are configured, set these values in the FastAPI terminal before startup:
+Run the ingestion, MapReduce, and PySpark steps in [Process the dataset on the cluster](#process-the-dataset-on-the-cluster), then set these values before starting FastAPI:
 
 ```powershell
 $env:ANALYTICS_MODE = "hdfs"
@@ -120,7 +132,7 @@ $env:HDFS_USER = "hadoop"
 $env:HDFS_DASHBOARD_PATH = "/youtube/analytics/dashboard"
 ```
 
-The React UI is unchanged; FastAPI returns the same dashboard schema and labels this as an HDFS snapshot. To return to local processing, set `$env:ANALYTICS_MODE = "local"` and restart FastAPI.
+The React UI is unchanged; FastAPI returns the same dashboard schema and labels the source as an HDFS snapshot. To switch to local processing, set `$env:ANALYTICS_MODE = "local"` and restart FastAPI.
 
 ## Required applications and where they go
 
@@ -149,7 +161,7 @@ Use the official sources:
 - [Node.js downloads](https://nodejs.org/)
 - On Ubuntu, install OpenJDK/Python/OpenSSH/Maven with the OS package manager.
 
-Do not install Hadoop as a Windows daemon for this deployment. Do not mix arbitrary Hadoop and Spark versions. Docker is not required.
+Run Hadoop as Linux services rather than native Windows daemons for this deployment. Do not mix arbitrary Hadoop and Spark versions. Docker is not required.
 
 ### Optional: Ubuntu on Windows with WSL2
 
@@ -168,7 +180,7 @@ java -version
 mvn -version
 ```
 
-Hadoop and Spark still require downloading, configuring, and testing. For a multi-PC cluster, first confirm the Linux environments can connect to each other on the required Hadoop ports; WSL2's default NAT may require extra networking configuration.
+For a multi-PC cluster, ensure the Linux environments can connect to each other on the required Hadoop ports; WSL2's default NAT may need networking configuration.
 
 ## Three-PC cluster topology
 
@@ -306,4 +318,4 @@ npm ci
 npm run build
 ```
 
-End-to-end acceptance requires a configured three-PC cluster: ingest the original dataset, run Hadoop MapReduce and PySpark through YARN, verify both workers execute tasks, inspect HDFS outputs, and load the dashboard from the FastAPI host. A local frontend build or API unit test alone does not establish distributed execution.
+For an end-to-end cluster validation, ingest the original dataset, run Hadoop MapReduce and PySpark through YARN, confirm both workers execute tasks, inspect the HDFS outputs, and load the dashboard from the FastAPI host in HDFS mode. A local frontend build or API unit test alone does not establish distributed execution.

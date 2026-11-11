@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
   BarChart3,
+  Check,
   ChevronDown,
   CircleHelp,
   Eye,
@@ -55,6 +56,114 @@ function compact(value: number) {
 function dateLabel(date: string) {
   const parsed = new Date(`${date}T00:00:00`);
   return parsed.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
+}
+
+function RegionSelect({ value, regions, onChange }: { value: string; regions: string[]; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const options = ["all", ...regions];
+  const selectedIndex = Math.max(0, options.indexOf(value));
+  const selectedLabel = value === "all" ? "All regions" : regionNames[value] ?? value;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) optionRefs.current[activeIndex]?.focus();
+  }, [open, activeIndex]);
+
+  const selectOption = (option: string) => {
+    onChange(option);
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  const moveFocus = (index: number) => {
+    const nextIndex = (index + options.length) % options.length;
+    setActiveIndex(nextIndex);
+    optionRefs.current[nextIndex]?.focus();
+  };
+
+  return (
+    <div className={`region-select${open ? " is-open" : ""}`} ref={containerRef}>
+      <button
+        ref={triggerRef}
+        className="region-select-trigger"
+        type="button"
+        aria-label="Filter by region"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls="region-options"
+        onClick={() => {
+          setActiveIndex(selectedIndex);
+          setOpen((isOpen) => !isOpen);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setActiveIndex(selectedIndex);
+            setOpen(true);
+          }
+        }}
+      >
+        <Globe2 size={18} aria-hidden="true" />
+        <span>{selectedLabel}</span>
+        <ChevronDown size={17} className="select-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="region-options" id="region-options" role="listbox" aria-label="Select a region">
+          {options.map((option, index) => {
+            const label = option === "all" ? "All regions" : regionNames[option] ?? option;
+            const selected = option === value;
+            return (
+              <button
+                ref={(element) => { optionRefs.current[index] = element; }}
+                className={`region-option${selected ? " selected" : ""}`}
+                key={option}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                tabIndex={activeIndex === index ? 0 : -1}
+                onClick={() => selectOption(option)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    moveFocus(index + 1);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    moveFocus(index - 1);
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    moveFocus(0);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    moveFocus(options.length - 1);
+                  } else if (event.key === "Escape") {
+                    setOpen(false);
+                    triggerRef.current?.focus();
+                  } else if (event.key === "Tab") {
+                    setOpen(false);
+                  }
+                }}
+              >
+                <span>{label}</span>
+                {selected && <Check size={16} aria-hidden="true" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function App() {
@@ -244,16 +353,7 @@ function App() {
               <h1>Trending, in perspective<span>.</span></h1>
               <p>Explore what captured attention across YouTube’s regional trending feeds.</p>
             </div>
-            <label className="region-select">
-              <Globe2 size={16} />
-              <select value={region} onChange={(event) => changeRegion(event.target.value)} aria-label="Filter by region">
-                <option value="all">All regions</option>
-                {(data?.metadata.regions ?? Object.keys(regionNames)).map((code) => (
-                  <option value={code} key={code}>{regionNames[code] ?? code}</option>
-                ))}
-              </select>
-              <ChevronDown size={14} className="select-chevron" />
-            </label>
+            <RegionSelect value={region} regions={data?.metadata.regions ?? Object.keys(regionNames)} onChange={changeRegion} />
           </section>
 
           {loading && <div className="notice loading-notice"><RefreshCw size={17} className="spin" /> {analyticsMode === "local" ? "Reading and analyzing the local Kaggle dataset…" : "Loading persisted HDFS analytics…"}</div>}
