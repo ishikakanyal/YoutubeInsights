@@ -11,4 +11,3 @@ target/
 data/
 *.log
 .DS_Store
-overview.md
