@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings
+from app.local_analytics import LocalAnalyticsRepository, LocalDatasetUnavailable
 from app.snapshot import SnapshotRepository, SnapshotUnavailable
 
 
@@ -14,13 +15,21 @@ from app.snapshot import SnapshotRepository, SnapshotUnavailable
 async def lifespan(app: FastAPI):
     settings = Settings.from_env()
     app.state.settings = settings
-    app.state.snapshots = SnapshotRepository(settings)
+    if settings.analytics_mode == "local":
+        app.state.analytics = LocalAnalyticsRepository(
+            settings.dataset_dir, settings.local_cache_seconds
+        )
+    else:
+        app.state.analytics = SnapshotRepository(settings)
     yield
 
 
 app = FastAPI(
     title="YouTube Video Analytics API",
-    description="Serves persisted dashboard analytics computed by PySpark on YARN.",
+    description=(
+        "Serves local Pandas analytics or persisted dashboard results produced by "
+        "PySpark on YARN."
+    ),
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -35,8 +44,9 @@ app.add_middleware(
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(request: Request) -> dict[str, str]:
+    settings: Settings = request.app.state.settings
+    return {"status": "ok", "analytics_mode": settings.analytics_mode}
 
 
 @app.get("/api/dashboard")
@@ -44,22 +54,24 @@ def dashboard(
     request: Request,
     region: Annotated[str | None, Query(min_length=2, max_length=2)] = None,
 ) -> dict[str, Any]:
-    repository: SnapshotRepository = request.app.state.snapshots
+    settings: Settings = request.app.state.settings
+    repository = request.app.state.analytics
     try:
         payload = repository.load()
-    except SnapshotUnavailable as exc:
+    except (LocalDatasetUnavailable, SnapshotUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    result = dict(payload)
+    result["metadata"] = dict(payload["metadata"])
+    result["metadata"]["analytics_mode"] = settings.analytics_mode
     selected_region = region.upper() if region else None
-    if selected_region and selected_region not in payload["metadata"]["regions"]:
+    if selected_region and selected_region not in result["metadata"]["regions"]:
         raise HTTPException(
             status_code=404, detail=f"No analytics are available for region {selected_region}."
         )
     if selected_region is None:
-        return payload
+        return result
 
-    result = dict(payload)
-    result["metadata"] = dict(payload["metadata"])
     result["metadata"]["selected_region"] = selected_region
     for key in ("countries", "categories", "channels", "videos", "trends"):
         result[key] = [row for row in payload[key] if row.get("region") == selected_region]

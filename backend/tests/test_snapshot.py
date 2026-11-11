@@ -24,6 +24,9 @@ def payload() -> dict:
 
 def make_settings(snapshot_file: str | None) -> Settings:
     return Settings(
+        analytics_mode="hdfs",
+        dataset_dir=Path("data/youtube-new"),
+        local_cache_seconds=300,
         webhdfs_url="http://unused/webhdfs/v1",
         hdfs_user="hadoop",
         dashboard_path="/youtube/analytics/dashboard",
@@ -31,6 +34,22 @@ def make_settings(snapshot_file: str | None) -> Settings:
         cache_seconds=0,
         cors_origins=(),
     )
+
+
+def test_analytics_mode_defaults_to_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANALYTICS_MODE", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.analytics_mode == "local"
+    assert settings.dataset_dir.name == "youtube-new"
+
+
+def test_invalid_analytics_mode_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANALYTICS_MODE", "spark")
+
+    with pytest.raises(ValueError, match="ANALYTICS_MODE must be"):
+        Settings.from_env()
 
 
 def test_loads_actual_local_spark_snapshot(tmp_path: Path, payload: dict) -> None:

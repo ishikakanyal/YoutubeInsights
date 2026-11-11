@@ -14,6 +14,7 @@ import {
   Server,
   Sparkles,
   Video,
+  X,
 } from "lucide-react";
 import {
   Area,
@@ -58,10 +59,41 @@ function dateLabel(date: string) {
 
 function App() {
   const [region, setRegion] = useState("all");
+  const [activeNav, setActiveNav] = useState("overview");
+  const [analyticsMode, setAnalyticsMode] = useState<"local" | "hdfs">("local");
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [aboutOpen, setAboutOpen] = useState(false);
+
+  useEffect(() => {
+    if (!aboutOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAboutOpen(false);
+        setActiveNav("overview");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [aboutOpen]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiBaseUrl}/api/health`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Analytics API returned ${response.status}`);
+        return (await response.json()) as { analytics_mode: "local" | "hdfs" };
+      })
+      .then((health) => setAnalyticsMode(health.analytics_mode))
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name !== "AbortError") {
+          console.error("Could not read analytics mode from FastAPI health endpoint.", reason);
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -76,14 +108,19 @@ function App() {
         }
         return (await response.json()) as DashboardData;
       })
-      .then(setData)
+      .then((payload: DashboardData) => {
+        setAnalyticsMode(payload.metadata.analytics_mode);
+        setData(payload);
+      })
       .catch((reason: unknown) => {
         if (reason instanceof Error && reason.name !== "AbortError") {
           setData(null);
           setError(reason.message);
         }
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
     return () => controller.abort();
   }, [region, refreshKey]);
 
@@ -160,38 +197,39 @@ function App() {
   }, [data]);
 
   const selectedCountry = data?.countries[0];
+  const missingDataset = error?.toLowerCase().includes("local kaggle dataset is missing") ?? false;
   const changeRegion = (value: string) => setRegion(value);
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" href="#" aria-label="YouTube Insights home">
-          <span className="brand-mark"><Play size={16} fill="currentColor" /></span>
+          <span className="brand-mark"><Play size={16} fill="white"/></span>
           <span className="brand-name">youtube<span>insights</span></span>
         </a>
         <div className="workspace-label">WORKSPACE</div>
         <nav className="nav-list" aria-label="Main navigation">
-          <a className="nav-item active" href="#overview"><BarChart3 size={18} /> Overview</a>
-          <a className="nav-item" href="#trends"><Activity size={18} /> Trends</a>
-          <a className="nav-item" href="#categories"><Sparkles size={18} /> Categories</a>
-          <a className="nav-item" href="#channels"><Video size={18} /> Videos & channels</a>
+          <a className={`nav-item ${activeNav === "overview" ? "active" : ""}`} href="#overview" aria-current={activeNav === "overview" ? "page" : undefined} onClick={() => setActiveNav("overview")}><BarChart3 size={18} /> Overview</a>
+          <a className={`nav-item ${activeNav === "trends" ? "active" : ""}`} href="#trends" aria-current={activeNav === "trends" ? "page" : undefined} onClick={() => setActiveNav("trends")}><Activity size={18} /> Trends</a>
+          <a className={`nav-item ${activeNav === "categories" ? "active" : ""}`} href="#categories" aria-current={activeNav === "categories" ? "page" : undefined} onClick={() => setActiveNav("categories")}><Sparkles size={18} /> Categories</a>
+          <a className={`nav-item ${activeNav === "channels" ? "active" : ""}`} href="#channels" aria-current={activeNav === "channels" ? "page" : undefined} onClick={() => setActiveNav("channels")}><Video size={18} /> Videos & channels</a>
         </nav>
         <div className="sidebar-spacer" />
         <div className="cluster-card">
-          <div className="cluster-heading"><span className="status-dot neutral-dot" /> PROCESSING STACK</div>
-          <strong>Distributed analytics</strong>
-          <span>HDFS <i /> YARN <i /> Spark</span>
-          <div className="cluster-detail"><Server size={13} /> Snapshot-backed dashboard</div>
+          <div className="cluster-heading"><span className="status-dot neutral-dot" /> ANALYTICS MODE</div>
+          <strong>{analyticsMode === "local" ? "Local Analytics" : "HDFS snapshot"}</strong>
+          <span>{analyticsMode === "local" ? "Pandas · local CSVs" : "HDFS · WebHDFS"}</span>
+          <div className="cluster-detail"><Server size={13} /> {analyticsMode === "local" ? "No Hadoop/Spark execution" : "Reading persisted results"}</div>
         </div>
-        <a className="nav-item help-link" href="#about"><CircleHelp size={17} /> About the data</a>
+        <button className={`nav-item help-link ${activeNav === "about" ? "active" : ""}`} type="button" aria-current={activeNav === "about" ? "page" : undefined} onClick={() => { setActiveNav("about"); setAboutOpen(true); }}><CircleHelp size={17} /> About the data</button>
         <div className="sidebar-footer">YOUTUBE INSIGHTS <span>·</span> v1.0</div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Analytics</span><span className="crumb-slash">/</span><strong>Overview</strong></div>
+          <div className="breadcrumbs"><span>Analytics</span><span className="crumb-slash">/</span><strong>{activeNav === "channels" ? "Videos & channels" : activeNav === "about" ? "About the data" : activeNav[0].toUpperCase() + activeNav.slice(1)}</strong></div>
           <div className="topbar-actions">
-            <div className="data-status"><span className="status-dot neutral-dot" /> Historical dataset</div>
+            <div className="data-status"><span className="status-dot neutral-dot" /> {analyticsMode === "local" ? "Local Analytics" : "HDFS snapshot"}</div>
             <button className="icon-button" aria-label="Refresh dashboard" onClick={() => setRefreshKey((key) => key + 1)}>
               <RefreshCw size={16} />
             </button>
@@ -218,11 +256,15 @@ function App() {
             </label>
           </section>
 
-          {loading && <div className="notice loading-notice"><RefreshCw size={17} className="spin" /> Loading persisted analytics…</div>}
+          {loading && <div className="notice loading-notice"><RefreshCw size={17} className="spin" /> {analyticsMode === "local" ? "Reading and analyzing the local Kaggle dataset…" : "Loading persisted HDFS analytics…"}</div>}
           {!loading && error && (
             <div className="notice error-notice">
               <div className="notice-icon"><Server size={18} /></div>
-              <div><strong>Analytics output is not available</strong><p>{error}</p><span>Upload the Kaggle data and run the PySpark job; see overview.md.</span></div>
+              <div>
+                <strong>{analyticsMode === "local" && missingDataset ? "Local dataset is missing" : analyticsMode === "local" ? "Local analytics are unavailable" : "HDFS analytics are unavailable"}</strong>
+                <p>{error}</p>
+                <span>{analyticsMode === "local" ? "Check ANALYTICS_DATASET_DIR and the ten regional CSV/category JSON files." : "Check HDFS WebHDFS connectivity and the persisted Spark output."}</span>
+              </div>
               <button onClick={() => setRefreshKey((key) => key + 1)}>Retry</button>
             </div>
           )}
@@ -284,7 +326,7 @@ function App() {
               <section className="lower-grid">
                 <article className="panel category-panel" id="categories">
                   <PanelHeading eyebrow="CONTENT MIX" title="Top categories" subtitle="Ranked by latest observed views">
-                    <a className="text-link" href="#videos">Explore videos <ArrowUpRight size={13} /></a>
+                    <a className="text-link" href="#videos" onClick={() => setActiveNav("channels")}>Explore videos <ArrowUpRight size={13} /></a>
                   </PanelHeading>
                   <div className="category-list">
                     {categories.map((category, index) => {
@@ -373,7 +415,7 @@ function App() {
                 <div className="chart-footnote table-footnote"><span>Ranked by view count</span><span>Top 20 per selected region</span></div>
               </section>
 
-              <footer className="page-footer" id="about">
+              <footer className="page-footer">
                 <div><span className="footer-mark"><Sparkles size={13} /></span><span><strong>Research note</strong> · Trending snapshots, not total YouTube viewership.</span></div>
                 <span>Snapshot {new Date(data.metadata.generated_at).toLocaleString()} · {compact(data.metadata.record_count)} valid observations</span>
               </footer>
@@ -381,6 +423,34 @@ function App() {
           )}
         </div>
       </main>
+      {aboutOpen && (
+        <div className="about-overlay" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setAboutOpen(false);
+            setActiveNav("overview");
+          }
+        }}>
+          <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
+            <header className="about-dialog-header">
+              <div>
+                <div className="panel-eyebrow">DATASET & METHODOLOGY</div>
+                <h2 id="about-title">About the data</h2>
+              </div>
+              <button className="about-close" type="button" aria-label="Close About the data" onClick={() => { setAboutOpen(false); setActiveNav("overview"); }}><X size={18} /></button>
+            </header>
+            <div className="about-dialog-content">
+              <p>This dashboard uses the <a href="https://www.kaggle.com/datasets/datasnaek/youtube-new" target="_blank" rel="noreferrer">YouTube Trending Video Dataset on Kaggle</a>. It contains daily trending-video observations from ten regional feeds, with video statistics, categories, and channel information.</p>
+              <div className="about-facts">
+                <article><strong>What views mean</strong><span>Views and engagement come from the dataset’s trending snapshots. They are not total YouTube viewership or viewer location data.</span></article>
+                <article><strong>How engagement is calculated</strong><span>(Likes + comments) ÷ views × 100. A zero-view observation has a 0% engagement rate.</span></article>
+                <article><strong>Latest-observation metrics</strong><span>Overview, category, channel, and video totals use the latest valid observation for each video in each region. Trends use dated observations.</span></article>
+                <article><strong>Current analytics mode</strong><span>{analyticsMode === "local" ? "Local Analytics uses Pandas to process the local CSV and category JSON files; Hadoop and Spark are not running in this mode." : "HDFS snapshot reads persisted analytics from HDFS; it does not start a live Hadoop or Spark job."}</span></article>
+              </div>
+              {data && <div className="about-data-stats">Current snapshot: {compact(data.metadata.record_count)} valid observations · generated {new Date(data.metadata.generated_at).toLocaleString()}</div>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

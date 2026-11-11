@@ -56,6 +56,7 @@ export interface TrendMetric {
 
 export interface DashboardData {
   metadata: {
+    analytics_mode: "local" | "hdfs";
     generated_at: string;
     source: string;
     record_count: number;
