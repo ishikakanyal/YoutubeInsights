@@ -32,7 +32,7 @@ The local analytics path has been run against the downloaded Kaggle files. It pr
 
 Video engagement data is naturally multi-dimensional: it can be grouped by date, region, video, category, and channel. Repeated observations of the same video also require care: view counts are cumulative counters in snapshots, so summing every row as if it represented new views would inflate totals.
 
-This project provides an end-to-end example of storing and processing this dataset with Hadoop technologies, serving dashboard-ready analytics through a web API, and exploring results through an interactive dashboard. Local Analytics mode provides a way to run the same dashboard using Pandas when a user is developing or demonstrating the interface without submitting a cluster job.
+This project provides an end-to-end example of storing and processing this dataset with Hadoop technologies, serving dashboard-ready analytics through a web API, and exploring results through an interactive dashboard. Local Analytics mode provides a way to run the same dashboard using Pandas when a user is developing or demonstrating the interface without submitting a cluster job. Combining both big data analytics and its technologies along with a deployable website for Frontend and Backend Development.
 
 
 
